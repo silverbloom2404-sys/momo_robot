@@ -1,2 +1,3 @@
 # momo_robot
-a desk pet 
+a desk pet project
+
