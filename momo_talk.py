@@ -1,15 +1,13 @@
 """
-momo_talk.py  -  talk to Momo with your voice.
+momo_talk.py  -  THE file you run. Talk to Momo with your voice.
 
-Say "Hey Momo" (or just "Momo"), then ask something.
-Momo answers out loud and its face changes. After Momo answers it keeps
-listening for ~20 seconds, so you can chat without saying the wake word again.
-
-Needs momo_brain.py in the SAME folder.
+You speak, Momo listens, thinks, changes face and answers out loud.
+Needs momo_brain.py (his brain) in the SAME folder.
 
 Run:
     python momo_talk.py             # talk to Momo
-    python momo_talk.py --devices   # list microphones (if Momo can't hear you)
+    python momo_talk.py --devices   # list microphones
+    python momo_talk.py --level     # test: shows how loud your mic hears you
 """
 
 import re
@@ -19,19 +17,20 @@ import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
 
-from momo_brain import ask_momo, speak, link, TOPIC_MOOD, API_KEY, history
+from momo_brain import ask_and_speak, stop_speaking, speak, warm_up, API_KEY, stop_flag
 
 # ---------- settings ----------
-ALWAYS_LISTEN = True     # True = Momo answers everything you say. False = needs "Hey Momo" first
+HEADPHONES = False       # True = you wear headphones, so you can INTERRUPT Momo by talking.
+                         # False = Momo stops listening while he talks (no echo problems on speakers).
+ALWAYS_LISTEN = True     # True = answers everything you say. False = only when you say "Momo"
 MIC_DEVICE = None        # None = default mic. Or a number from --devices
 RATE = 16000
 LANGUAGE = "en-IN"       # "en-US" for American English
-MIN_VOLUME = 300         # raise if Momo reacts to noise, lower if it misses your voice
-SILENCE_S = 0.9          # a pause this long means "I'm done talking"
-MAX_RECORD_S = 10        # longest sentence
-AWAKE_S = 20             # how long Momo keeps listening after an answer
+MIN_VOLUME = 300         # raise if Momo reacts to noise, lower if he misses your voice
+SILENCE_S = 0.7          # a pause this long means "I'm done talking" (lower = faster reply)
+MAX_RECORD_S = 15        # longest sentence
 
-# Google often mishears "Momo", so these all count as the wake word
+STOP_WORDS = {"stop", "shh", "quiet", "enough", "wait", "okay stop", "ok stop"}
 WAKE = r"\b(hey momo|hi momo|ok momo|okay momo|momo|mo mo|mumu|moomoo|mommo|hey mom|hi mom)\b[,.!?]*\s*"
 
 recognizer = sr.Recognizer()
@@ -41,16 +40,20 @@ def level(block):
     return float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
 
 
-def record_phrase(wait_seconds=None):
-    """Wait for speech, record until the person stops. Returns audio, or None if nobody spoke in time."""
+def stop_talking():
+    """Cut Momo off if he is still speaking."""
+    stop_speaking()
+
+
+def record_phrase(on_speech=None):
+    """Wait for you to speak, record until you stop. Calls on_speech() the moment you start."""
     block = int(RATE * 0.1)
-    silence_blocks = int(SILENCE_S / 0.1)
+    silence_blocks = max(1, int(SILENCE_S / 0.1))
     before = []
     frames = []
     started = False
     silent = 0
 
-    # the microphone is only open while we listen, so Momo never hears its own voice
     with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", device=MIC_DEVICE) as stream:
         ambient = [level(stream.read(block)[0]) for _ in range(3)]
         threshold = max(MIN_VOLUME, 2.5 * sum(ambient) / len(ambient))
@@ -64,8 +67,8 @@ def record_phrase(wait_seconds=None):
                     started = True
                     frames.extend(before)
                     t0 = time.time()
-                elif wait_seconds and time.time() - t0 > wait_seconds:
-                    return None
+                    if on_speech:
+                        on_speech()
             else:
                 frames.append(data)
                 silent = 0 if loud else silent + 1
@@ -87,17 +90,15 @@ def to_text(audio):
 def answer(text):
     print(f"You: {text}")
     try:
-        mood, reply = ask_momo(text)
+        # Momo starts talking while the AI is still writing.
+        # wait=True (speakers): comes back only after Momo finishes, so the mic never hears him.
+        # wait=False (headphones): comes back at once, so you can interrupt him by talking.
+        ask_and_speak(text, wait=not HEADPHONES)
     except Exception as e:
         print("Brain error:", e)
-        if history:
-            history.pop()
         return
-    if mood:
-        link.publish(TOPIC_MOOD, mood)
-    print(f"Momo [{mood}]: {reply}")
-    speak(reply)
-    time.sleep(0.4)          # let the room go quiet before listening again
+    if not HEADPHONES:
+        time.sleep(0.4)                     # let the room go quiet
 
 
 def main():
@@ -105,57 +106,41 @@ def main():
         print(sd.query_devices())
         print("\nPut the number of your microphone into MIC_DEVICE at the top of this file.")
         return
+    if "--level" in sys.argv:
+        print("Talk for 4 seconds...")
+        rec = sd.rec(int(4 * RATE), samplerate=RATE, channels=1, dtype="int16", device=MIC_DEVICE)
+        sd.wait()
+        print("Loudest level:", int(np.abs(rec).max()), "(should be in the hundreds or thousands)")
+        return
     if not API_KEY:
-        sys.exit("No GEMINI_API_KEY found. Run setx GEMINI_API_KEY \"your-key\" and open a NEW Command Prompt.")
+        sys.exit('No GEMINI_API_KEY found. Run setx GEMINI_API_KEY your-key and open a NEW Command Prompt.')
 
-    print("Momo is listening. Say 'Hey Momo' and then ask something. (Ctrl+C to stop)\n")
-    awake_until = 0.0
+    warm_up()                                # open the connection to Google
+    speak("Hi hi! I'm Momo. Talk to me!")    # hello, so you know the speaker works
+    mode = "headphones: you can interrupt Momo by talking" if HEADPHONES else "speakers: Momo listens after he finishes"
+    print(f"Momo is listening ({mode}). Just talk! Ctrl+C to stop.\n")
 
     while True:
-        if ALWAYS_LISTEN:                          # answer everything, no wake word needed
-            audio = record_phrase()
-            text = to_text(audio)
-            if text:
-                clean = re.sub(WAKE, "", text.lower(), count=1).strip()
-                answer(clean if clean else text)
+        audio = record_phrase(on_speech=stop_talking if HEADPHONES else None)
+        text = to_text(audio)
+        if not text:
             continue
 
-        awake = time.time() < awake_until
+        low = re.sub(r"[^\w\s]", "", text.lower()).strip()
+        if low in STOP_WORDS:
+            print("You: (stop)")
+            stop_talking()
+            continue
 
-        if awake:
-            print("  [listening...]")
-            audio = record_phrase(wait_seconds=8)
-            if audio is None:                      # nobody spoke: go back to waiting for the wake word
-                awake_until = 0.0
-                print("  (back to sleep, say 'Hey Momo')")
-                continue
-            text = to_text(audio)
-            if not text:
-                continue
-            clean = re.sub(WAKE, "", text.lower(), count=1).strip()
-            answer(clean if clean else text)
-            awake_until = time.time() + AWAKE_S
-        else:
-            audio = record_phrase()                # waits as long as needed
-            text = to_text(audio)
-            if not text:
-                continue
-            low = text.lower()
-            if not re.search(WAKE, low):
-                continue                           # not for Momo, ignore
-            question = re.sub(WAKE, "", low, count=1).strip()
-            if question:
-                answer(question)
-            else:
-                link.publish(TOPIC_MOOD, "happy")
-                print("Momo: Yes?")
-                speak("Yes? I'm listening!")
-                time.sleep(0.4)
-            awake_until = time.time() + AWAKE_S
+        if not ALWAYS_LISTEN and not re.search(WAKE, text.lower()):
+            continue                         # not meant for Momo
+        clean = re.sub(WAKE, "", text.lower(), count=1).strip()
+        answer(clean if clean else text)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        stop_flag.set()
         print("\nBye!")
