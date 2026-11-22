@@ -13,7 +13,10 @@ Only typing to Momo (no microphone):
 
 ```
 pip install requests paho-mqtt edge-tts
+
 ```
+pip install opencv-python numpy
+
 
 ## Gemini API key (free)
 
