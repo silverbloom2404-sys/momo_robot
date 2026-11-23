@@ -24,7 +24,7 @@ pip install opencv-python numpy
 2. Save it, then open a NEW Command Prompt:
 
 ```
-setx GEMINI_API_KEY "your-key-here"
+setx GEMINI_API_KEY AQ.Ab8RN6I5EUIgkBHPMQzgCbwYLaQ54PQOBInGe6uNPjaj61_fWg
 ```
 
 Never upload the key to GitHub.
